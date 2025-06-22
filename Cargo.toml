@@ -1,0 +1,8 @@
+[package]
+name = "pi-frame"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gstreamer = "0.23.6"
+glib = "0.20.10"

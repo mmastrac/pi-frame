@@ -1,0 +1,14 @@
+[Unit]
+Description=Start pi-frame service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/srv/pi-frame/pi-frame
+Restart=on-failure
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

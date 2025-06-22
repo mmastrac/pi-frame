@@ -1,0 +1,16 @@
+#!/bin/sh
+PREREQ="udev"
+
+prereqs()
+{
+        echo "${PREREQ}"
+}
+
+case ${1} in
+        prereqs)
+                prereqs
+                exit 0
+                ;;
+esac
+
+gzip -d < scripts/init-top/image-2.bin.gz > /dev/fb0

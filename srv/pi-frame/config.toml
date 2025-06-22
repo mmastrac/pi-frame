@@ -1,0 +1,15 @@
+[[source]]
+description="Camera 1"
+rtsp="rtsp://192.168.1.1:7447/lU7RqYAF3W9ZborZ"
+
+[[source]]
+description="Camera 2"
+rtsp="rtsp://192.168.1.1:7447/IjIY1LIA3w5k2XW3"
+
+[[source]]
+description="Camera 3"
+rtsp="rtsp://192.168.1.1:7447/XzM3XEhXCY2jNB8G"
+
+[[source]]
+description="Blank"
+videotestsrc="black"

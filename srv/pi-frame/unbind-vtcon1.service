@@ -1,0 +1,10 @@
+[Unit]
+Description=Unbind vtcon1 to free up the framebuffer
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/srv/pi-frame/unbind-vtcon1.sh
+
+[Install]
+WantedBy=multi-user.target

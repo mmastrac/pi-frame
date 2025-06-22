@@ -1,0 +1,21 @@
+#!/bin/sh
+
+PREREQ="udev"
+
+prereqs()
+{
+	echo "${PREREQ}"
+}
+
+case ${1} in
+	prereqs)
+		prereqs
+		exit 0
+		;;
+esac
+
+echo "*** init-premount" > /dev/kmsg
+
+chvt 3
+gzip -d < scripts/init-top/image-1.bin.gz > /dev/fb0
+sleep 2
