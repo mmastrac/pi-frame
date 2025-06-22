@@ -37,12 +37,19 @@ fn stream_image(
     image: &str,
     width: usize,
     height: usize,
+    scale: Option<(usize, usize)>,
 ) -> Result<gstreamer::Element, Box<dyn std::error::Error>> {
     let bin = Bin::new();
+    let scale = if let Some((width, height)) = scale {
+        format!("! videoscale ! video/x-raw,width={width},height={height}")
+    } else {
+        String::new()
+    };
     let pipeline = gstreamer::parse::launch(&format!(
         r#"
     filesrc location={image} 
         ! decodebin
+        {scale}
         ! imagefreeze name="image"
         ! videobox name="padding" autocrop=true
         ! videoscale
@@ -79,6 +86,34 @@ fn stream_image(
     Ok(bin.upcast())
 }
 
+fn stream_videotestsrc(
+    pattern: &str,
+    width: usize,
+    height: usize,
+) -> Result<gstreamer::Element, Box<dyn std::error::Error>> {
+    let bin = Bin::new();
+    let pipeline = gstreamer::parse::launch(&format!(
+        r#"
+    videotestsrc pattern={pattern}
+        ! queue
+        ! videoscale
+        ! videoconvert
+        ! video/x-raw,width={width},height={height}
+        ! queue name=sink
+    "#
+    ))?;
+    bin.add(&pipeline)?;
+
+    let sink = pipeline.downcast::<gstreamer::Bin>().expect("not a bin");
+    let sink = sink.by_name("sink").expect("no sink");
+    let sink_pad = sink.static_pad("src").expect("static pad");
+
+    let ghost_pad = GhostPad::with_target(&sink_pad)?;
+    ghost_pad.set_active(true)?;
+    bin.add_pad(&ghost_pad)?;
+    Ok(bin.upcast())
+}
+
 #[derive(Debug)]
 struct CompositorPad {
     pad: gstreamer::Pad,
@@ -91,18 +126,28 @@ struct CompositorPad {
 fn make_compositor(
     width: usize,
     height: usize,
+    layout: Layout,
+    time: Option<String>,
 ) -> Result<(gstreamer::Element, Vec<CompositorPad>), Box<dyn std::error::Error>> {
+    let time = time
+        .map(|time| {
+            format!(
+                "! clockoverlay halignment=right valignment=bottom time-format={time:?} font-desc=\"Arial 16\"",
+            )
+        })
+        .unwrap_or_default();
     let pipeline = gstreamer::parse::launch(&format!(
         r#"
-    compositor name="mixer" background="transparent" 
-        ! queue ! videoconvert ! queue ! fbdevsink sync=false
+    compositor name="mixer" background="transparent" ! videoconvert
+        {time}
+        ! fbdevsink sync=false
     "#
     ))?;
     let pipeline = pipeline.downcast::<gstreamer::Bin>().expect("not a bin");
     let compositor = pipeline.by_name("mixer").expect("no mixer");
     let mut pads = vec![];
 
-    for n in 0..4 {
+    for n in 0..layout.horizontal * layout.vertical {
         let pad = compositor
             .request_pad_simple(&format!("sink_{n}"))
             .expect("no pad");
@@ -111,10 +156,10 @@ fn make_compositor(
         pipeline.add_pad(&ghost)?;
         pads.push(CompositorPad {
             pad,
-            x: ((n % 2) * width / 2) as _,
-            y: ((n / 2) * height / 2) as _,
-            width: (width / 2) as _,
-            height: (height / 2) as _,
+            x: ((n % layout.horizontal) * width / layout.horizontal) as _,
+            y: ((n / layout.horizontal) * height / layout.vertical) as _,
+            width: (width / layout.horizontal) as _,
+            height: (height / layout.vertical) as _,
         });
     }
 
@@ -130,9 +175,17 @@ struct Source {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum SourceType {
-    Rtsp { rtsp: String },
-    Videotestsrc { videotestsrc: String },
-    Image { image: String },
+    Rtsp {
+        rtsp: String,
+    },
+    Videotestsrc {
+        videotestsrc: String,
+    },
+    Image {
+        image: String,
+        width: Option<usize>,
+        height: Option<usize>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +198,7 @@ struct Config {
 struct Display {
     framebuffer: String,
     layout: Layout,
+    time: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,7 +235,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize GStreamer
     gstreamer::init()?;
 
-    let (compositor, pads) = make_compositor(1280, 800)?;
+    let (compositor, pads) = make_compositor(
+        width as _,
+        height as _,
+        config.display.layout,
+        config.display.time,
+    )?;
 
     let pipeline = gstreamer::Pipeline::with_name("pi-frame");
     pipeline.add(&compositor)?;
@@ -195,15 +254,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             SourceType::Videotestsrc { videotestsrc } => {
                 eprintln!("Configuring videotestsrc source: {videotestsrc}");
-                let stream = gstreamer::ElementFactory::make("videotestsrc")
-                    .property_from_str("pattern", &videotestsrc)
-                    .build()?;
+                let stream = stream_videotestsrc(&videotestsrc, 640, 400)?;
                 stream
             }
-            SourceType::Image { image } => {
+            SourceType::Image {
+                image,
+                width: scale_width,
+                height: scale_height,
+            } => {
                 let image = config_dir.join(image).canonicalize()?;
                 eprintln!("Configuring image source: {image:?}");
-                let stream = stream_image(image.to_str().unwrap(), 640, 400)?;
+                let scale = match (*scale_width, *scale_height) {
+                    (Some(width), Some(height)) => Some((width, height)),
+                    (None, None) => None,
+                    _ => panic!("width and height must be provided"),
+                };
+                let stream = stream_image(image.to_str().unwrap(), width as _, height as _, scale)?;
                 stream
             }
         };
@@ -223,7 +289,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     for pad in pads {
-        eprintln!("{pad:?}");
         pad.pad.set_property("xpos", pad.x);
         pad.pad.set_property("ypos", pad.y);
         pad.pad.set_property("width", pad.width);

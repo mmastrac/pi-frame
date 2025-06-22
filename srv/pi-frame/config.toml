@@ -1,6 +1,7 @@
 [display]
 framebuffer="/dev/fb0"
 layout = { horizontal = 2, vertical = 2 }
+time="%d %b  %H:%M"
 
 [[sources]]
 description="Basement"
@@ -11,9 +12,12 @@ description="Backdoor"
 rtsp="rtsp://192.168.1.1:7447/IjIY1LIA3w5k2XW3"
 
 [[sources]]
-description="Doorbell"
-rtsp="rtsp://192.168.1.1:7447/XzM3XEhXCY2jNB8G"
+description="Doorbell (out of order)"
+#rtsp="rtsp://192.168.1.1:7447/XzM3XEhXCY2jNB8G"
+videotestsrc="smpte-rp-219"
 
 [[sources]]
 description=""
-image="cat-3.png"
+image="cat.png"
+width=640
+height=640
