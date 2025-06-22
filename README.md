@@ -7,11 +7,13 @@ A Rust-based application that displays multiple video streams (RTSP, images, or 
 
 ## Videos
 
-Setting up the display:
+I've got a few videos on the project available on my YouTube channel [@Paleotechnica](https://www.youtube.com/@Paleotechnica):
+
+[Setting up the display](https://www.youtube.com/watch?v=QM3KeK8U2nE):
 
 <a href="https://www.youtube.com/watch?v=QM3KeK8U2nE"><img src="./docs/video1.jpg" width="300" alt="Video 1 thumbnail"></a>
 
-Writing the software:
+[Writing the software](https://www.youtube.com/watch?v=UDPTQ9VW_7c):
 
 <a href="https://www.youtube.com/watch?v=UDPTQ9VW_7c"><img src="./docs/video2.jpg" width="300" alt="Video 2 thumbnail"></a>
 
