@@ -5,4 +5,8 @@ edition = "2024"
 
 [dependencies]
 gstreamer = "0.23.6"
+gstreamer-video = "0.23.6"
 glib = "0.20.10"
+toml = "0.8.23"
+serde = { version = "1.0", features = ["derive"] }
+framebuffer = "0.3.1"
