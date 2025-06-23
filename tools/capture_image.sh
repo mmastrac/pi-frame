@@ -50,7 +50,7 @@ convert /tmp/"$OUTNAME" -background black -alpha remove -alpha off /tmp/"$OUTNAM
 cp /tmp/"$OUTNAME" target/intermediate.png
 
 sudo fbi -T 3 -d /dev/fb0 --noverbose /tmp/"$OUTNAME"
-sudo dd if=/dev/fb0 of=- > /tmp/"$OUTNAME".bin
+sudo dd if=/dev/fb0 > /tmp/"$OUTNAME".bin
 gzip -9f /tmp/"$OUTNAME".bin
 mv /tmp/"$OUTNAME".bin.gz srv/pi-frame/
 rm /tmp/"$OUTNAME" /tmp/black_mask.png /tmp/scaled_image.png
