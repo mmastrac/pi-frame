@@ -8,15 +8,25 @@ fn stream_rtsp(
     url: &str,
     width: usize,
     height: usize,
+    scale: RtspScale,
 ) -> Result<gstreamer::Element, Box<dyn std::error::Error>> {
     let bin = Bin::new();
+    let (scale, scale_opts) = match scale {
+        RtspScale::Fit => (String::new(), ""),
+        RtspScale::Crop => (
+            format!("! aspectratiocrop aspect-ratio={width}/{height}"),
+            "",
+        ),
+        RtspScale::Scale => (format!(""), "add-borders=false"),
+    };
     let pipeline = gstreamer::parse::launch(&format!(
         r#"
     rtspsrc location={url} 
-        ! queue ! rtph264depay ! h264parse ! queue ! v4l2h264dec 
+        ! queue ! rtph264depay ! h264parse 
+        ! queue ! v4l2h264dec
+        {scale} 
         ! queue 
-        ! videoscale 
-        ! videoconvert 
+        ! videoconvertscale  {scale_opts}
         ! video/x-raw,width={width},height={height},pixel-aspect-ratio=1/1
         ! queue name=sink
     "#
@@ -172,11 +182,23 @@ struct Source {
     source: SourceType,
 }
 
+#[derive(Copy, Clone, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RtspScale {
+    /// Show bars on the sides of the video
+    Fit,
+    /// Crop the video to the aspect ratio of the container
+    Crop,
+    /// Scale the video to the aspect ratio of the container
+    Scale,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum SourceType {
     Rtsp {
         rtsp: String,
+        scale: RtspScale,
     },
     Videotestsrc {
         videotestsrc: String,
@@ -222,9 +244,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     eprintln!("Framebuffer size: {width}x{height}");
 
-    let frame = framebuffer.read_frame();
-    let zeros = vec![0; frame.len()];
-    framebuffer.write_frame(&zeros);
+    // Clear the framebuffer in debug mode
+    if std::env::var("CLEAR_FRAMEBUFFER").is_ok() {
+        let frame = framebuffer.read_frame();
+        let zeros = vec![0; frame.len()];
+        framebuffer.write_frame(&zeros);
+    }
 
     eprintln!("Config:");
     eprintln!("{config:?}");
@@ -247,9 +272,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (index, source) in config.sources.iter().enumerate() {
         let element = match &source.source {
-            SourceType::Rtsp { rtsp } => {
+            SourceType::Rtsp { rtsp, scale } => {
                 eprintln!("Configuring RTSP source: {rtsp}");
-                let stream = stream_rtsp(&rtsp, 640, 400)?;
+                let stream = stream_rtsp(&rtsp, 640, 400, *scale)?;
                 stream
             }
             SourceType::Videotestsrc { videotestsrc } => {

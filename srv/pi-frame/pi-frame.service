@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/srv/pi-frame/pi-frame
+ExecStart=/srv/pi-frame/pi-frame.sh
 Restart=on-failure
 StandardOutput=journal
 StandardError=journal

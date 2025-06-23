@@ -44,9 +44,6 @@ sudo cp target/release/pi-frame /srv/pi-frame/
 
 # Copy configuration and service files
 sudo cp srv/pi-frame/* /srv/pi-frame/
-
-# Make the binary executable
-sudo chmod +x /srv/pi-frame/pi-frame
 ```
 
 ### 3. Configure the Display
@@ -68,10 +65,12 @@ time="%d %b  %H:%M"  # Optional time display
 [[sources]]
 description="Camera 1"
 rtsp="rtsp://your-camera-ip:port/stream"
+scale="fit" # fit, crop, or scale
 
 [[sources]]
 description="Camera 2"
 rtsp="rtsp://your-camera-ip:port/stream"
+scale="fit" # fit, crop, or scale
 
 [[sources]]
 description="Test Pattern"
@@ -84,9 +83,12 @@ width=640
 height=640
 ```
 
-### 4. Configure Boot Settings (Optional)
+### 4. Configure Boot Settings
 
-For headless operation or specific display configurations, you may need to modify boot settings:
+To boot the Pi with status images, but without systemd messages, you may need to
+modify the boot settings.
+
+These are provided as a sample and may depend on your Pi and screen model.
 
 ```bash
 # Copy boot configuration files

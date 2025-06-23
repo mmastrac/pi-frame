@@ -6,10 +6,12 @@ time="%d %b  %H:%M"
 [[sources]]
 description="Basement"
 rtsp="rtsp://192.168.1.1:7447/lU7RqYAF3W9ZborZ"
+scale="crop"
 
 [[sources]]
 description="Backdoor"
 rtsp="rtsp://192.168.1.1:7447/IjIY1LIA3w5k2XW3"
+scale="crop"
 
 [[sources]]
 description="Doorbell (out of order)"
@@ -18,6 +20,6 @@ videotestsrc="smpte-rp-219"
 
 [[sources]]
 description=""
-image="cat.png"
+image="placeholder.png"
 width=640
 height=640
