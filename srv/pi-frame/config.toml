@@ -1,7 +1,7 @@
 [display]
 framebuffer="/dev/fb0"
 layout = { horizontal = 2, vertical = 2 }
-time="%d %b  %H:%M:%S"
+time="%d %b - %H:%M"
 
 [[sources]]
 description="Basement"
@@ -21,4 +21,9 @@ scale="crop"
 [[sources]]
 description="Doorbell"
 rtsp="rtsp://192.168.1.1:7447/fbsLGYIOao1Q1wGO"
-scale="crop"
+scale="fit"
+
+#description=""
+#image="placeholder.png"
+#width=640
+#height=640

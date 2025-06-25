@@ -285,7 +285,6 @@ fn restart_source(
         .expect("no parent")
         .downcast::<gstreamer::Element>()
         .expect("not an element");
-    peer_parent.release_request_pad(&peer);
     pipeline.remove(&bin)?;
 
     // "Can't set the state of the src to NULL from its streaming thread"
