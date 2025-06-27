@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 use gstreamer::{Bin, GhostPad, MessageView, prelude::*};
 use gstreamer_video::VideoInfo;
@@ -14,6 +14,7 @@ fn stream_rtsp(
     scale: RtspScale,
 ) -> Result<gstreamer::Element, Box<dyn std::error::Error>> {
     let bin = Bin::with_name(id);
+
     let (scale, scale_opts) = match scale {
         RtspScale::Fit => (String::new(), ""),
         RtspScale::Crop => (
@@ -25,24 +26,30 @@ fn stream_rtsp(
 
     // Buffer up to 2 seconds of video with a target latency of 200ms
     let id = format!("{RTSP_PREFIX}{id}");
+    let watchdog_id = format!("{id}_watchdog");
+    let decoder_id = format!("{id}_decoder");
+    let videoconvertscale_id = format!("{id}_videoconvertscale");
     let pipeline = gstreamer::parse::launch(&format!(
         r#"
-    rtspsrc location={url:?} name={id:?} latency=2000 drop-on-latency=true protocols=udp
-        ! queue leaky=downstream
-        ! rtph264depay ! h264parse 
-        ! queue leaky=downstream
-        ! v4l2h264dec name="decoder"
-        {scale} 
-        ! queue leaky=downstream max-size-time=2000000000
-        ! videoconvertscale  {scale_opts}
-        ! video/x-raw,width={width},height={height},pixel-aspect-ratio=1/1
-        ! queue name=sink
+        rtspsrc location={url:?} name={id:?} latency=2000 drop-on-latency=true protocols=udp
+            ! queue leaky=downstream
+            ! rtph264depay ! h264parse 
+            ! queue leaky=downstream
+            ! v4l2h264dec name={decoder_id:?}
+            ! watchdog name={watchdog_id:?} timeout=30000
+            {scale} 
+            ! queue leaky=downstream max-size-time=2000000000
+            ! videoconvertscale name={videoconvertscale_id:?}  {scale_opts}
+            ! video/x-raw,width={width},height={height},pixel-aspect-ratio=1/1
+            ! queue name=sink
     "#
     ))?;
+
     bin.add(&pipeline)?;
 
-    let decoder = bin.by_name("decoder").expect("no decoder");
-    probe_image_format("decoder", &decoder.static_pad("src").expect("no src"));
+    let decoder = bin.by_name(&decoder_id).expect("no decoder");
+    let decoder_src = decoder.static_pad("src").expect("no src");
+    probe_image_format(&decoder_id, &decoder_src);
 
     let sink = pipeline.downcast::<gstreamer::Bin>().expect("not a bin");
     let sink = sink.by_name("sink").expect("no sink");
@@ -164,10 +171,10 @@ fn make_compositor(
         .unwrap_or_default();
     let pipeline = gstreamer::parse::launch(&format!(
         r#"
-    compositor name="mixer"
+    compositor name="mixer" background=black
         ! videorate drop-only=true
         ! videoconvert
-        ! video/x-raw,framerate=10/1,width={width},height={height},pixel-aspect-ratio=1/1
+        ! video/x-raw,framerate=24/1,width={width},height={height},pixel-aspect-ratio=1/1
         {time}
         ! fbdevsink sync=false
     "#
@@ -255,6 +262,7 @@ struct Layout {
     vertical: usize,
 }
 
+#[derive(Debug, Clone)]
 /// A source that has been instantiated and added to the pipeline
 struct InstantiatedSource {
     source: Source,
@@ -264,12 +272,45 @@ struct InstantiatedSource {
     height: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestartReason {
+    Timeout,
+    Error,
+    Reentrant,
+}
+
 fn restart_source(
     pipeline: &gstreamer::Pipeline,
     source: &InstantiatedSource,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Restarting source: {}", source.name);
+    reason: RestartReason,
+) {
+    static RESTART_LOCK: std::sync::LazyLock<std::sync::Mutex<HashMap<String, bool>>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+    let mut restart_lock = RESTART_LOCK.lock().unwrap();
+    if restart_lock.get(&source.name).is_some() {
+        // Ensure no re-entrancy
+        if reason != RestartReason::Reentrant {
+            let pipeline = pipeline.clone();
+            let source = source.clone();
+            glib::idle_add(move || {
+                restart_source(&pipeline, &source, RestartReason::Reentrant);
+                glib::ControlFlow::Break
+            });
+        }
+        return;
+    }
+    restart_lock.insert(source.name.clone(), true);
+    drop(restart_lock);
 
+    if let Err(e) = restart_inner(pipeline, source) {
+        eprintln!("*** Failed to restart source {}: {e:?}", source.name);
+    }
+
+    let mut restart_lock = RESTART_LOCK.lock().unwrap();
+    restart_lock.remove(&source.name);
+}
+
+fn restart_inner(pipeline: &gstreamer::Pipeline, source: &InstantiatedSource) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Restarting source: {}", source.name);
     let bin = pipeline
         .by_name(&source.name)
         .expect("no bin")
@@ -296,7 +337,6 @@ fn restart_source(
         }
         glib::ControlFlow::Break
     });
-
     let element = create_source(source)?;
     pipeline.add(&element)?;
 
@@ -358,6 +398,52 @@ fn probe_image_format(name: &str, pad: &gstreamer::Pad) {
     });
 }
 
+struct SnapshotRequester {
+    tx: std::sync::mpsc::Sender<Box<dyn FnOnce(image::ImageResult<Vec<u8>>) + Send>>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+impl SnapshotRequester {
+    fn request(&self, f: impl FnOnce(image::ImageResult<Vec<u8>>) + Send + 'static) {
+        self.tx.send(Box::new(f)).unwrap();
+    }
+}
+
+fn rgb565_to_rgb888(buf: &[u8]) -> Vec<u8> {
+    buf.chunks(2).flat_map(|b| {
+        let pixel = u16::from_le_bytes([b[0], b[1]]);
+        let r = ((pixel >> 11) & 0x1F) << 3;
+        let g = ((pixel >> 5) & 0x3F) << 2;
+        let b = (pixel & 0x1F) << 3;
+        [r as _, g as _, b as _]
+    }).collect()
+}
+
+fn start_framebuffer_snapshot_thread(framebuffer: framebuffer::Framebuffer) -> SnapshotRequester {
+    use image::{write_buffer_with_format, ImageFormat, ExtendedColorType};
+    use std::io::Cursor;
+
+    let width = framebuffer.var_screen_info.xres;
+    let height = framebuffer.var_screen_info.yres;
+    let (tx, rx) = std::sync::mpsc::channel::<Box<dyn FnOnce(image::ImageResult<Vec<u8>>) + Send>>();
+
+    let handle = std::thread::spawn(move || {
+        while let Ok(f) = rx.recv() {
+            eprintln!("Taking snapshot");
+            let frame = framebuffer.read_frame();
+            let image = frame.to_vec();
+
+            let image = rgb565_to_rgb888(&image);
+
+            let mut buf = Cursor::new(Vec::new());
+            let res = write_buffer_with_format(&mut buf, &image, width, height, ExtendedColorType::Rgb8, ImageFormat::Png);
+            f(res.map(|_| buf.into_inner()));
+        }
+    });
+
+    SnapshotRequester { tx, handle }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_file = std::env::args()
         .nth(1)
@@ -365,6 +451,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_file = Path::new(&config_file).canonicalize()?;
     let config_dir = config_file.parent().unwrap().to_owned();
     let mut config = toml::from_str::<Config>(std::fs::read_to_string(config_file)?.as_str())?;
+
+    // Set up main loop
+    let main_loop = glib::MainLoop::new(None, false);
+
+    // Initialize GStreamer
+    gstreamer::init()?;
+
+    gstfallbackswitch::plugin_register_static()?;
 
     // Resolve image paths
     for source in &mut config.sources {
@@ -387,6 +481,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         framebuffer.var_screen_info.yres,
     );
     eprintln!("Framebuffer size: {width}x{height}");
+    eprintln!("Display var_screen_info: {:?}", framebuffer.var_screen_info);
 
     // Clear the framebuffer in debug mode
     if std::env::var("CLEAR_FRAMEBUFFER").is_ok() {
@@ -395,14 +490,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         framebuffer.write_frame(&zeros);
     }
 
+    let snapshotter = start_framebuffer_snapshot_thread(framebuffer);
+
     eprintln!("Config:");
     eprintln!("{config:?}");
-
-    // Set up main loop
-    let main_loop = glib::MainLoop::new(None, false);
-
-    // Initialize GStreamer
-    gstreamer::init()?;
 
     let (compositor, pads) = make_compositor(
         width as _,
@@ -431,10 +522,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         pipeline.add(&element)?;
 
-        let text_overlay = gstreamer::parse::launch(&format!(
-            r#"textoverlay text={:?} font-desc="Arial 20" scale-mode="none""#,
+        let fallback_timeout = Duration::from_secs(10).as_nanos();
+        let text_overlay = gstreamer::parse::bin_from_description(&format!(
+            r#"
+                fallbackswitch name=fallback immediate-fallback=true timeout={fallback_timeout}
+                    ! textoverlay text={:?} font-desc="Arial 20" scale-mode="none"
+
+                identity silent=true signal-handoffs=false ! fallback.
+                videotestsrc pattern=snow ! alpha alpha=0.5 ! queue ! fallback.
+                "#,
             source.description
-        ))?;
+        ), true)?;
         pipeline.add(&text_overlay)?;
         element.link(&text_overlay)?;
 
@@ -464,10 +562,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("Error from source: {source_name}");
                             if source_name.starts_with(RTSP_PREFIX) {
                                 let name = source_name.strip_prefix(RTSP_PREFIX).unwrap();
+                                let name = name.strip_suffix("_watchdog").unwrap_or(&name);
                                 let source = sources.get(name).unwrap();
-                                if let Err(e) = restart_source(&pipeline_clone, source) {
-                                    eprintln!("*** Failed to restart source {source_name}: {e:?}");
-                                }
+                                restart_source(&pipeline_clone, source, RestartReason::Error);
                             }
                         }
                     }
@@ -478,6 +575,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(src) = state.src() {
                     let name = src.name();
                     if name.starts_with(RTSP_PREFIX) || name == "pi-frame" {
+                        // pipeline_clone.debug_to_dot_file(gstreamer::DebugGraphDetails::all(), "pipeline");
                         if state.old() != gstreamer::State::Null {
                             println!(
                                 "State changed [{name:?}]: {:?} -> {:?}",
@@ -496,9 +594,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("RTSP timeout on source: {name}");
                             let name = name.strip_prefix(RTSP_PREFIX).unwrap();
                             let source = sources.get(name).unwrap();
-                            if let Err(e) = restart_source(&pipeline_clone, source) {
-                                eprintln!("*** Failed to restart source {name}: {e:?}");
-                            }
+                            restart_source(&pipeline_clone, source, RestartReason::Timeout);
                         }
                     } else if structure.name().contains("Timeout") {
                         println!("Timeout on element: {:?}", element);
@@ -526,12 +622,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             MessageView::Eos(element) => {
                 println!("EOS on element: {:?}", element);
             }
+            MessageView::Qos(qos) => {
+                if let Some(src) = qos.src() {
+                    let name = src.name().to_string();
+                    // println!("QoS: {name:?} {:?} {:?} {:?}", qos.stats(), qos.values(), qos.get());
+                }
+            }
+            MessageView::Latency(latency) => {
+                // Ignored...
+            }
+            MessageView::Progress(progress) => {
+                if let Some(src) = progress.src() {
+                    let name = src.name().to_string();
+                    println!("Progress: {name:?} {:?}", progress.get());
+                }
+            }
             _ => {
-                // println!("Message: {:?}", msg.view());
+                println!("Message: {:?}", msg.view());
             }
         }
         glib::ControlFlow::Continue
     })?;
+
+    // std::thread::spawn(move || {
+    //     loop {
+    //         snapshotter.request(|image| {
+    //             match image {
+    //                 Ok(image) => match std::fs::write("target/frame.jpg", image) {
+    //                     Ok(_) => {},
+    //                     Err(e) => eprintln!("Failed to write snapshot: {e:?}"),
+    //                 },
+    //                 Err(e) => eprintln!("Failed to take snapshot: {e:?}"),
+    //             }
+    //         });
+    //         println!("Received frame");
+    //         std::thread::sleep(std::time::Duration::from_secs(10));
+    //     }
+    // });
+
     pipeline.set_state(gstreamer::State::Playing)?;
 
     main_loop.run();

@@ -5,25 +5,26 @@ time="%d %b - %H:%M"
 
 [[sources]]
 description="Basement"
-rtsp="rtsp://192.168.1.1:7447/lU7RqYAF3W9ZborZ"
+rtsp="rtsp://192.168.1.1:7447/FP6m5n8xk03pNxvP"
 scale="crop"
 
 [[sources]]
 description="Backdoor"
-rtsp="rtsp://192.168.1.1:7447/IjIY1LIA3w5k2XW3"
+rtsp="rtsp://192.168.1.1:7447/5uGkJWowQg3ZA5xK"
 scale="crop"
 
 [[sources]]
 description="Cat feeder"
-rtsp="rtsp://192.168.1.1:7447/h3ykz5s09oGhWYXM"
+rtsp="rtsp://192.168.1.1:7447/euoO4WFtCtzwkknU"
 scale="crop"
 
 [[sources]]
 description="Doorbell"
-rtsp="rtsp://192.168.1.1:7447/fbsLGYIOao1Q1wGO"
-scale="fit"
+rtsp="rtsp://192.168.1.1:7447/2CXbkmWvaQoFZKoI"
+scale="crop"
 
-#description=""
-#image="placeholder.png"
-#width=640
-#height=640
+# [[sources]]
+# description=""
+# image="placeholder.png"
+# width=640
+# height=640
