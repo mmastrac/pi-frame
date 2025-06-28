@@ -1,5 +1,6 @@
-use std::{collections::HashMap, path::Path, time::Duration};
+use std::{collections::HashMap, path::Path, sync::atomic::AtomicBool, time::Duration};
 
+use glib::property::PropertyGet;
 use gstreamer::{Bin, GhostPad, MessageView, prelude::*};
 use gstreamer_video::VideoInfo;
 use serde::Deserialize;
@@ -29,30 +30,59 @@ fn stream_rtsp(
     let watchdog_id = format!("{id}_watchdog");
     let decoder_id = format!("{id}_decoder");
     let videoconvertscale_id = format!("{id}_videoconvertscale");
-    let pipeline = gstreamer::parse::launch(&format!(
-        r#"
-        rtspsrc location={url:?} name={id:?} latency=2000 drop-on-latency=true protocols=udp
-            ! queue leaky=downstream
-            ! rtph264depay ! h264parse 
-            ! queue leaky=downstream
-            ! v4l2h264dec name={decoder_id:?}
-            ! watchdog name={watchdog_id:?} timeout=30000
-            {scale} 
-            ! queue leaky=downstream max-size-time=2000000000
-            ! videoconvertscale name={videoconvertscale_id:?}  {scale_opts}
-            ! video/x-raw,width={width},height={height},pixel-aspect-ratio=1/1
-            ! queue name=sink
-    "#
-    ))?;
+    
+    let rtspsrc = gstreamer::parse::launch( &format!(r#"
+    rtspsrc location={url:?} name={id:?} buffer-mode=none latency=2000 drop-on-latency=true protocols=tcp"#))?;
 
+    // let rtspsrc = gstreamer::parse::launch(&format!(r#""#))?;
+    let pipeline = gstreamer::parse::bin_from_description_with_name(&format!(
+        r#"
+                queue name=netqueue max-size-time=2000000000 leaky=downstream
+                ! rtph264depay wait-for-keyframe=true ! h264parse config-interval=1
+                ! queue name=parsequeue max-size-time=2000000000 leaky=downstream
+                ! v4l2h264dec name={decoder_id:?}
+                ! watchdog name={watchdog_id:?} timeout=30000
+                {scale} 
+                ! queue leaky=downstream max-size-time=2000000000
+                ! videoconvertscale name={videoconvertscale_id:?}  {scale_opts}
+                ! video/x-raw,width={width},height={height},pixel-aspect-ratio=1/1
+                ! queue name=sink
+    "#
+    ), true, "sink")?;
+
+    bin.add(&rtspsrc)?;
     bin.add(&pipeline)?;
 
-    let decoder = bin.by_name(&decoder_id).expect("no decoder");
+    let pipeline_pad = pipeline.static_pad("sink").expect("no sink");
+
+    let bin_clone = bin.clone();
+
+    rtspsrc.connect_pad_added(move |src, src_pad| {
+        let caps = src_pad.current_caps().expect("no caps");
+        let accept = caps.structure(0)
+            .and_then(|s| s.get::<&str>("media").ok())
+            .map(|media| media == "video")
+            .unwrap_or(false);
+
+        if accept {
+            eprintln!("Accepting video stream for {}", id);
+            src_pad.link(&pipeline_pad).expect("no link");
+        } else {
+            eprintln!("Rejecting stream for {}", id);
+
+            let fs = gstreamer::ElementFactory::make("fakesink").build().expect("fakesink");
+            bin_clone.add(&fs).unwrap();
+            fs.sync_state_with_parent().unwrap();
+    
+            src_pad.link(&fs.static_pad("sink").expect("sink")).expect("link to fakesink");
+        }
+    });
+
+    let decoder = pipeline.by_name(&decoder_id).expect("no decoder");
     let decoder_src = decoder.static_pad("src").expect("no src");
     probe_image_format(&decoder_id, &decoder_src);
 
-    let sink = pipeline.downcast::<gstreamer::Bin>().expect("not a bin");
-    let sink = sink.by_name("sink").expect("no sink");
+    let sink = bin.by_name("sink").expect("no sink");
     let sink_pad = sink.static_pad("src").expect("static pad");
 
     let ghost_pad = GhostPad::with_target(&sink_pad)?;
@@ -174,7 +204,7 @@ fn make_compositor(
     compositor name="mixer" background=black
         ! videorate drop-only=true
         ! videoconvert
-        ! video/x-raw,framerate=24/1,width={width},height={height},pixel-aspect-ratio=1/1
+        ! video/x-raw,framerate=24/1,width={width},height={height},pixel-aspect-ratio=1/1,format=RGB16
         {time}
         ! fbdevsink sync=false
     "#
@@ -284,6 +314,8 @@ fn restart_source(
     source: &InstantiatedSource,
     reason: RestartReason,
 ) {
+    println!("Restarting source: {}", source.name);
+
     static RESTART_LOCK: std::sync::LazyLock<std::sync::Mutex<HashMap<String, bool>>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
     let mut restart_lock = RESTART_LOCK.lock().unwrap();
     if restart_lock.get(&source.name).is_some() {
@@ -301,22 +333,27 @@ fn restart_source(
     restart_lock.insert(source.name.clone(), true);
     drop(restart_lock);
 
-    if let Err(e) = restart_inner(pipeline, source) {
-        eprintln!("*** Failed to restart source {}: {e:?}", source.name);
-    }
+    let bin = pipeline.by_name(&source.name).expect("no bin").downcast::<gstreamer::Bin>().expect("not a bin");
 
-    let mut restart_lock = RESTART_LOCK.lock().unwrap();
-    restart_lock.remove(&source.name);
+    // "Can't set the state of the src to NULL from its streaming thread"
+    // https://github.com/GStreamer/gst-python/blob/master/examples/dynamic_src.py
+    let pipeline = pipeline.clone();
+    let source = source.clone();
+    glib::idle_add(move || {
+        if let Err(e) = restart_inner_deferred(&pipeline, &bin, &source) {
+            eprintln!("*** Failed to restart source {}: {e:?}", source.name);
+        }
+
+        let mut restart_lock = RESTART_LOCK.lock().unwrap();
+        restart_lock.remove(&source.name);
+
+        println!("Restarted source: {}", source.name);
+        
+        glib::ControlFlow::Break
+    });
 }
 
-fn restart_inner(pipeline: &gstreamer::Pipeline, source: &InstantiatedSource) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Restarting source: {}", source.name);
-    let bin = pipeline
-        .by_name(&source.name)
-        .expect("no bin")
-        .downcast::<gstreamer::Bin>()
-        .expect("not a bin");
-
+fn restart_inner_deferred(pipeline: &gstreamer::Pipeline, bin: &gstreamer::Bin, source: &InstantiatedSource) -> Result<(), Box<dyn std::error::Error>> {
     // Get the bin's output pad so we can figure out what it was linked to
     let pad = bin.static_pad("src").expect("no src");
     let peer = pad.peer().expect("no peer");
@@ -326,17 +363,13 @@ fn restart_inner(pipeline: &gstreamer::Pipeline, source: &InstantiatedSource) ->
         .expect("no parent")
         .downcast::<gstreamer::Element>()
         .expect("not an element");
-    pipeline.remove(&bin)?;
 
-    // "Can't set the state of the src to NULL from its streaming thread"
-    // https://github.com/GStreamer/gst-python/blob/master/examples/dynamic_src.py
-    glib::idle_add(move || {
-        match bin.set_state(gstreamer::State::Null) {
-            Ok(_) => eprintln!("Set bin to null"),
-            Err(e) => eprintln!("Error setting bin to null: {e:?}"),
-        }
-        glib::ControlFlow::Break
-    });
+    match bin.set_state(gstreamer::State::Null) {
+        Ok(_) => eprintln!("Set bin to null"),
+        Err(e) => eprintln!("Error setting bin to null: {e:?}"),
+    }
+    pipeline.remove(bin)?;
+
     let element = create_source(source)?;
     pipeline.add(&element)?;
 
@@ -344,7 +377,6 @@ fn restart_inner(pipeline: &gstreamer::Pipeline, source: &InstantiatedSource) ->
     element.link(&peer_parent)?;
     element.sync_state_with_parent()?;
 
-    println!("Restarted source: {}", source.name);
     Ok(())
 }
 
@@ -529,7 +561,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ! textoverlay text={:?} font-desc="Arial 20" scale-mode="none"
 
                 identity silent=true signal-handoffs=false ! fallback.
-                videotestsrc pattern=snow ! alpha alpha=0.5 ! queue ! fallback.
+                videotestsrc pattern=black ! alpha alpha=0.5 ! queue ! fallback.
                 "#,
             source.description
         ), true)?;
